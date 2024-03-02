@@ -1,2 +1,1 @@
-# bulk-transcriptomics
-bulk-transcriptomics
+# Bulk transcriptomics

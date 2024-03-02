@@ -1,0 +1,4 @@
+outputs*
+.snakemake
+.DS_Store
+.notes
