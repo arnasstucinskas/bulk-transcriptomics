@@ -1,11 +1,11 @@
 SAMPLES = [
-    # "KAPA_mRNA_HyperPrep_-UHRR-KAPA-100_ng_total_RNA-3_S8",
-    # "KAPA_mRNA_HyperPrep_-UHRR-KAPA-100_ng_total_RNA-2_S7",
-    # "KAPA_mRNA_HyperPrep_-HBR-KAPA-100_ng_total_RNA-3_S6",
-    # "KAPA_mRNA_HyperPrep_-HBR-KAPA-100_ng_total_RNA-2_S5",
-    # "Collibri_standard_protocol-UHRR-Collibri-100_ng-2_S3",
-    # "Collibri_standard_protocol-UHRR-Collibri-100_ng-3_S4",
-    # "Collibri_standard_protocol-HBR-Collibri-100_ng-3_S2",
+    "KAPA_mRNA_HyperPrep_-UHRR-KAPA-100_ng_total_RNA-3_S8",
+    "KAPA_mRNA_HyperPrep_-UHRR-KAPA-100_ng_total_RNA-2_S7",
+    "KAPA_mRNA_HyperPrep_-HBR-KAPA-100_ng_total_RNA-3_S6",
+    "KAPA_mRNA_HyperPrep_-HBR-KAPA-100_ng_total_RNA-2_S5",
+    "Collibri_standard_protocol-UHRR-Collibri-100_ng-2_S3",
+    "Collibri_standard_protocol-UHRR-Collibri-100_ng-3_S4",
+    "Collibri_standard_protocol-HBR-Collibri-100_ng-3_S2",
     "Collibri_standard_protocol-HBR-Collibri-100_ng-2_S1"
 ]
 
@@ -20,8 +20,18 @@ rule all:
         "outputs/multiqc_report.html",
         "outputs/trimmed_multiqc_report.html",
         expand("outputs/aligned_reads/{sample}_Aligned.sortedByCoord.out.bam", sample=SAMPLES),
-        expand("outputs/aligned_reads/{sample}_Aligned.sortedByCoord.out.bam.bai", sample=SAMPLES), # step 7
-        expand("outputs/counts/{sample}_counts.txt", sample=SAMPLES)
+        expand("outputs/aligned_reads/{sample}_Aligned.sortedByCoord.out.bam.bai", sample=SAMPLES),
+        expand("outputs/counts/{sample}_counts_strand1.txt", sample=SAMPLES),
+        expand("outputs/counts/{sample}_counts_strand2.txt", sample=SAMPLES),
+        expand("outputs/counts/{sample}_best_strand_number.txt", sample=SAMPLES),
+        expand("outputs/counts/{sample}_best_strand.txt", sample=SAMPLES),
+        "outputs/deseq2/count_matrix.csv",
+        "outputs/deseq2/column_data.csv",
+        "outputs/deseq2/deseq2_results.csv",
+        "outputs/deseq2/volcano_plot.png",
+        "outputs/deseq2/pca_plot_de_genes.png",
+        "outputs/deseq2/enrichment_results.csv"
+        
 
 #################################################################################################
 # 1. Evaluate  "raw" reads quality via FastQC.
@@ -118,17 +128,18 @@ rule multiqc_trimmed:
 # a) Rule for indexing the genome with STAR (https://github.com/alexdobin/STAR/blob/master/doc/STARmanual.pdf)
 rule star_index:
     input:
-        fa="data/play_data_ref_annot/chr19_20Mb.fa",  # Update this path to your genome fasta file
-        gtf="data/play_data_ref_annot/chr19_20Mb.gtf"  # Update this path to your genome GTF file
+        fa="data/play_data_ref_annot/chr19_20Mb.fa",
+        gtf="data/play_data_ref_annot/chr19_20Mb.gtf"
     output:
         directory("outputs/star_index")
     shell:
-        "STAR --runThreadN {threads} "
+        "STAR "
         "--runMode genomeGenerate "
+        "--genomeSAindexNbases 11 "
+        "--runThreadN 4 "
         "--genomeDir outputs/star_index "
-        "--genomeFastaFiles {input.fa} "
-        "--sjdbGTFfile {input.gtf} "
-        "--sjdbOverhang 99"  # Set this to the length of your reads minus 1
+        "--genomeFastaFiles data/play_data_ref_annot/chr19_20Mb.fa "
+        "--sjdbGTFfile data/play_data_ref_annot/chr19_20Mb.gtf"
 
 # b) Rule for aligning trimmed reads with STAR (use --outSAMtype BAM SortedByCoordinate to get a sorted alignment file)
 rule star_align:
@@ -144,7 +155,6 @@ rule star_align:
         "STAR --runThreadN {threads} "
         "--genomeDir {input.index} "
         "--readFilesIn {input.r1} {input.r2} "
-        "--readFilesCommand zcat "
         "--outFileNamePrefix {params.prefix} "
         "--outSAMtype BAM SortedByCoordinate"
 
@@ -168,10 +178,80 @@ rule feature_counts:
         bam="outputs/aligned_reads/{sample}_Aligned.sortedByCoord.out.bam",
         gtf="data/play_data_ref_annot/chr19_20Mb.gtf"
     output:
-        "outputs/counts/{sample}_counts.txt"
+        "outputs/counts/{sample}_counts_strand{strand}.txt"
     params:
-        strand_specificity="2"  # 1 or 2 based on library
+        strand_specificity=lambda wildcards: wildcards.strand
+    wildcard_constraints:
+        strand="1|2"
     shell:
         "featureCounts -p -t exon -g gene_id "
         "-a {input.gtf} -o {output} {input.bam} -s {params.strand_specificity}"
+
+# Select best strand number
+rule compare_feature_counts:
+    input:
+        counts1_summary="outputs/counts/{sample}_counts_strand1.txt",
+        counts2_summary="outputs/counts/{sample}_counts_strand2.txt"
+    output:
+        best_strand_number_file="outputs/counts/{sample}_best_strand_number.txt",
+        best_strand_file="outputs/counts/{sample}_best_strand.txt"
+    script:
+        "scripts/compare_counts.py"
+
+rule prepare_deseq2_input:
+    input:
+        counts=expand("outputs/counts/{sample}_best_strand.txt", sample=SAMPLES),
+    output:
+        count_matrix="outputs/deseq2/count_matrix.csv",
+        col_data="outputs/deseq2/column_data.csv"
+    script:
+        "scripts/prepare_deseq2_input.py"
+
+# #################################################################################################
+# # 8. For each sample preparation method perform a DE analysis comparing UHRRvsHBR. 
+# # UHRR is a sample originating from several cancerous cell lines,HBR represents “normal” sample
+# #################################################################################################
+
+# 8.1. DESeq2 differential expression analysis
+rule deseq2_analysis:
+    input:
+        count_matrix="outputs/deseq2/count_matrix.csv",
+        col_data="outputs/deseq2/column_data.csv"
+    output:
+        deseq2_results="outputs/deseq2/deseq2_results.csv"
+    script:
+        "scripts/run_deseq2_analysis.R"
+
+# 8.2. Generating a volcano plot from the DESeq2 results
+rule volcano_plot:
+    input:
+        deseq2_results="outputs/deseq2/deseq2_results.csv"
+    output:
+        volcano_plot="outputs/deseq2/volcano_plot.png"
+    script:
+        "scripts/generate_volcano_plot.R"
+
+# #################################################################################################
+# # 9. Create a PCA plot exploring how different sample preparation plots cluster based on 
+# # deferentially expressed genes (use genes that are DE for all sample preparation methods)
+# #################################################################################################
+rule pca_plot_de_genes:
+    input:
+        deseq2_results="outputs/deseq2/deseq2_results.csv"
+    output:
+        pca_plot="outputs/deseq2/pca_plot_de_genes.png"
+    script:
+        "scripts/generate_pca_plot.R"
+
+# #################################################################################################
+# # 10. Pathway enrichment analysis using fgsea
+# #################################################################################################
+rule fgsea_analysis:
+    input:
+        deseq2_results="outputs/deseq2/deseq2_results.csv"
+    output:
+        enrichment_results="outputs/deseq2/enrichment_results.csv",
+        fgsea_analysis_plot="outputs/deseq2/fgsea_analysis_plot.png"
+    script:
+        "scripts/run_fgsea_analysis.R"
 
